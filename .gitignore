@@ -1,0 +1,20 @@
+node_modules/
+.private/
+.env
+*.sqlite*
+*.log
+coverage/
+
+# Python bridge/export helpers never commit interpreter caches.
+__pycache__/
+
+# Operator credentials, sessions, generated releases and local task locks.
+.env.*
+!.env.example
+config.json
+*.session*
+*.pem
+*.key
+*.clerk.lock
+release/
+.venv/

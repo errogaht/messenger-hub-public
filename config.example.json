@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "port": 8792,
+  "store": "/private/messenger-hub/journal.sqlite",
+  "plugins": {"bitrix": "/opt/messenger-hub/src/plugins/bitrix.mjs"},
+  "connections": {
+    "company-a": {"plugin": "bitrix", "label": "Company A", "settings": {"sshCommand": "/private/company-a/pinned-ssh.sh", "root": "/var/www/portal", "actorId": 42, "host": "portal.example", "timezoneOffset": "+03:00"}},
+    "company-b": {"plugin": "bitrix", "label": "Company B", "settings": {"sshCommand": "/private/company-b/pinned-ssh.sh", "root": "/var/www/portal", "actorId": 73, "host": "portal-b.example", "timezoneOffset": "+03:00"}}
+  },
+  "scopes": {
+    "project-a": {"token": "SYNTHETIC_REPLACE_WITH_RANDOM_PRIVATE_TOKEN", "connections": {"company-a": {"read": true, "send": false, "conversations": "*", "profiles": false}}}
+  }
+}

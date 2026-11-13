@@ -1,0 +1,52 @@
+--- a/telegram_mcp/runner.py
++++ b/telegram_mcp/runner.py
+@@ -12,6 +12,18 @@
+ from telegram_mcp import runtime as _runtime
+ from telegram_mcp.runtime import *
+ import telegram_mcp.tools  # noqa: F401 - registers MCP tools via decorators
++
++# Pinned Hub extension borrows the bridge-owned client; it contains no login path.
++# Native forwarding is opt-in via a private config. Topic history is read-only.
++import importlib.util as _hub_importlib
++# Set an absolute, operator-owned module path in the bridge service environment.
++_hub_path = os.environ["MESSENGER_HUB_UPDATES_MODULE"]
++assert os.path.isabs(_hub_path), "Hub extension path must be absolute"
++_hub_spec = _hub_importlib.spec_from_file_location("_hub_native_updates", _hub_path)
++_hub_native_updates = _hub_importlib.module_from_spec(_hub_spec)
++_hub_spec.loader.exec_module(_hub_native_updates)
++_hub_native_updates.register_tools(_runtime)
++
+ 
+ 
+ async def _connect_authorized_client(label, client) -> None:
+@@ -101,6 +113,7 @@
+ 
+ 
+ async def _main() -> None:
++    _hub_forwarder = None
+     try:
+         labels = ", ".join(clients.keys())
+         print(f"Starting {len(clients)} Telegram client(s) ({labels})...", file=sys.stderr)
+@@ -129,6 +142,13 @@
+             f"Telegram client(s) started ({labels}). Running MCP server ({transport})...",
+             file=sys.stderr,
+         )
++        # No config means no native collection; keep all current sessions/scopes.
++        _hub_config = os.getenv("MESSENGER_HUB_INGEST_CONFIG")
++        if _hub_config:
++            try:
++                _hub_forwarder = await _hub_native_updates.install_existing(clients, _hub_config)
++            except Exception:
++                print("Hub native ingress disabled: configuration/account check failed", file=sys.stderr)
+         await _serve(transport)
+     except Exception as e:
+         print(f"Error starting client: {e}", file=sys.stderr)
+@@ -139,6 +159,8 @@
+             )
+         sys.exit(1)
+     finally:
++        if _hub_forwarder:
++            await _hub_forwarder.close()
+         try:
+             await asyncio.gather(
+                 *(cl.disconnect() for cl in clients.values()), return_exceptions=True

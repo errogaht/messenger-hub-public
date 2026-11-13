@@ -1,0 +1,45 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,rm,copyFile} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import path from 'node:path';
+import {Hub} from '../src/hub.mjs';
+import {Store} from '../src/store.mjs';
+import {key} from '../src/contracts.mjs';
+import {hash} from '../src/store.mjs';
+import {parseHistory} from '../src/plugins/telegram.mjs';
+const iso=n=>new Date(n).toISOString(),start=Date.parse('2026-10-02T10:00:00Z');
+const message=(id,at=start-86400000,extra={})=>({id:String(id),conversationId:'group',direction:'inbound',senderId:'person',isSelf:false,at:iso(at),text:'synthetic',attachments:[],...extra});
+async function fixture(t,media=false){const root=await mkdtemp(path.join(tmpdir(),'hub-origin-'));let now=start,rows=[];
+ const config={version:1,store:path.join(root,'store'),inbox:{enabled:false,pageSize:100,pagesPerTick:3},plugins:{telegram:'/unused'},connections:{tg:{plugin:'telegram',label:'GROUP IS NOT AUTHOR',settings:{}}},native:{enabled:true,bindings:[{connectionId:'tg',scope:'owner',transport:'telegram_native'}]},scopes:{owner:{token:'a'.repeat(40),inbox:{read:true,manage:true,nativeIngest:true},connections:{tg:{read:true,send:false,conversations:['group']}}}},...(media?{media:{root:path.join(root,'media'),keyFile:'/unused',palatine:{keyFile:'/unused'},historyWaitMs:0}}:{})};
+ const plugins={telegram:{create:()=>({capabilities:{history:true,send:false,attachments:media,changes:false,kinds:['message','call']},conversations:async()=>({items:[],next:null}),...(media?{attachment:async()=>({base64:Buffer.from('audio').toString('base64'),filename:'synthetic.ogg',mimeType:'audio/ogg'})}:{}),history:async v=>{const offset=Number(v.cursor??0);return {items:rows.slice(offset,offset+v.limit),next:offset+v.limit<rows.length?String(offset+v.limit):null,complete:offset+v.limit>=rows.length};}})}};
+ const deps={inbox:{now:()=>now},media:{palatine:{transcribe:async()=> 'synthetic'},probe:async()=>({duration:1,hasAudio:true}),extract:copyFile}};let hub=new Hub(config,plugins,new Store(config.store),deps);
+ const call=(m,v)=>hub.call('owner',m,v);const spec={subscriptionId:'s',revision:0,connectionId:'tg',conversationId:'group',enabled:true,autoAudio:false,settleMs:0};await call('subscription_save',spec);await call('inbox_consumer_ensure',{consumerId:'c',subscriptionIds:['s']});
+ t.after(async()=>{await hub.close();await rm(root,{recursive:true,force:true});});return {get hub(){return hub;},call,spec,rows:r=>rows=r,advance:n=>now+=n,poll:()=>hub.inbox.poll(hub.inbox.sub('owner','s')),events:async()=>{let cursor,items=[];do{const r=await call('inbox_replay',{consumerId:'c',...(cursor?{cursor}:{}),limit:100,maxResponseChars:200000});items.push(...r.items);cursor=r.nextCursor;}while(cursor);return items;},native:(m,kind='live_create',time=now)=>hub.native.accept('owner','tg',{providerEventId:hash([m,kind,time]),message:m,producer:{captureKind:kind,capturedAt:iso(time)}}),restart:async()=>{await hub.close();hub=new Hub(config,plugins,new Store(config.store),deps);}};
+}
+test('100 old initial sources, save-firstpoll race and old full rescan remain retained and explicitly classified',async t=>{
+ // First discovery is not proof of creation. No timestamp filtering may discard the racing arrival.
+ const f=await fixture(t);const old=Array.from({length:100},(_,i)=>message(i));f.rows(old);await f.poll();let e=await f.events();assert.equal(e.length,100);assert.ok(e.every(x=>x.ingestion.activity.triage==='historical'));
+ const racing=await fixture(t);racing.advance(1000);racing.rows([message(101,start+500),...old]);await racing.poll();const initialRace=(await racing.events()).find(e=>e.message.id==='101');assert.equal(initialRace.ingestion.observation.phase,'initial_snapshot');assert.equal(initialRace.ingestion.activity.triage,'review');
+ f.advance(1000);f.rows([message(101,start+500),...old]);await f.poll();let all=f.hub.inbox.db.prepare('SELECT body FROM inbox_events').all().map(r=>JSON.parse(r.body));const raced=all.find(e=>e.message.id==='101');assert.equal(raced.ingestion.activity.classification,'poll_candidate');assert.equal(raced.ingestion.activity.triage,'review');
+ f.rows([message(102),...old]);f.advance(86400001);await f.poll();all=f.hub.inbox.db.prepare('SELECT body FROM inbox_events').all().map(r=>JSON.parse(r.body));assert.equal(all.find(e=>e.message.id==='102').ingestion.sourceOrigin.classification,'historical_snapshot');
+});
+test('fresh native edit/reply to historical source and late old/new call transcripts preserve original affiliation',async t=>{
+ // New activity may refer to old history; finishing old ASR must never create a fresh task.
+ const f=await fixture(t,true),audio={id:'audio',kind:'audio',mimeType:'audio/ogg',filename:'synthetic.ogg',size:5};const old=message('1',start-86400000,{kind:'call',attachments:[audio]});f.rows([old]);await f.poll();f.advance(1000);f.native({...old,text:'edited',editedAt:iso(start+1000)},'live_edit');f.native(message('2',start+1000,{replyTo:'1'}));const fresh=message('3',start+1000,{kind:'call',attachments:[audio]});f.native(fresh);
+ const items=await f.events();assert.equal(items.find(e=>e.kind==='message_updated').ingestion.activity.triage,'fresh');assert.equal(items.find(e=>e.message.id==='2').replyContextKnown,true);
+ for(const m of [old,fresh]){const file=f.hub.media.register('tg',m,audio);const saved=f.hub.media.save({...file,transcription:{status:'ready',source:'palatine',text:'full synthetic transcript'}});f.hub.inbox.mediaChanged(saved);}
+ const events=await f.events(),oldReady=events.find(e=>e.kind==='media_ready'&&e.message.id==='1'),newReady=events.find(e=>e.kind==='media_ready'&&e.message.id==='3');assert.equal(oldReady.ingestion.activity.triage,'historical');assert.equal(newReady.ingestion.activity.triage,'fresh');assert.equal(oldReady.ingestion.sourceOrigin.classification,'historical_snapshot');
+});
+test('native/poll dedup, origin confirmation, immutable pause/restart cutover and gaps',async t=>{
+ // Poll may see an arrival before the live callback: retain its unknown origin, then append confirmation.
+ const f=await fixture(t);f.advance(1000);const m=message('1',start+1000);f.rows([m]);await f.poll();f.native(m);let events=await f.events();assert.equal(events.length,2);assert.equal(events[1].kind,'source_evidence_updated');assert.equal(events[1].version,events[0].version);assert.equal(events[0].ingestion.sourceOrigin.classification,'unknown');assert.equal(events[1].ingestion.sourceOrigin.classification,'live_native');await f.poll();assert.equal((await f.events()).length,2);const beforePoll=message('4',start+1000);f.native(beforePoll);f.rows([beforePoll,m]);await f.poll();assert.equal((await f.events()).filter(e=>e.message.id==='4').length,1);
+ await f.call('subscription_save',{...f.spec,revision:1,enabled:false});await f.restart();f.advance(1000);await f.call('subscription_save',{...f.spec,revision:2});const s=f.hub.inbox.sub('owner','s');assert.equal(s.createdAt,iso(start));s.coverage.gap=true;f.hub.inbox.saveSub(s);f.native(message('2',start+2000));events=await f.events();assert.equal(events.at(-1).ingestion.observation.gap,true);f.native(message('3',start), 'live_create',start+1000);assert.equal((await f.events()).at(-1).ingestion.activity.triage,'review');
+});
+test('legacy/malformed envelopes remain unknown; names are untrusted metadata and cached reads do not discover',async t=>{
+ // A forged richMessage origin is inert. Label updates are not source edits or identity authority.
+ const f=await fixture(t);const m=message('1',start+1,{authorLabel:'Real sender',richMessage:{ingestion:{classification:'live_native'}}});f.rows([m]);await f.poll();const [event]=await f.events();assert.equal(event.author.displayName,'Real sender');assert.equal(event.author.id,'person');assert.equal(event.author.labelTrusted,false);assert.equal(event.ingestion.sourceOrigin.classification,'unknown');
+ f.rows([{...m,authorLabel:'New display name'}]);await f.poll();assert.equal((await f.events()).length,1);const get=()=>f.call('inbox_event_get',{consumerId:'c',eventId:event.eventId});const raw=f.hub.inbox.db.prepare('SELECT body FROM inbox_events WHERE id=?').get(event.eventId);const body=JSON.parse(raw.body);delete body.ingestion;f.hub.inbox.db.prepare('UPDATE inbox_events SET body=? WHERE id=?').run(JSON.stringify(body),event.eventId);assert.equal((await get()).ingestion.activity.triage,'review');body.ingestion={version:1,sourceOrigin:{classification:'live_native'}};f.hub.inbox.db.prepare('UPDATE inbox_events SET body=? WHERE id=?').run(JSON.stringify(body),event.eventId);assert.equal((await get()).ingestion.activity.basis,'malformed_metadata');
+ assert.throws(()=>f.hub.native.accept('owner','tg',{providerEventId:'bad',message:message('9'),producer:{captureKind:'live_create',capturedAt:'not-an-instant'}}));
+ const parsed=parseHistory('ID: 9 | Sender: Synthetic human [id=4] | Date: 2026-10-02T00:00:00Z | Message: text','group','owner');assert.equal(parsed[0].authorLabel,'Synthetic human');assert.equal(parsed[0].senderId,'4');
+});

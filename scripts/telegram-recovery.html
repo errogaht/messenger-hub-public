@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Telegram — подключение</title>
+<style>
+body{font:17px/1.5 system-ui;margin:48px auto;padding:0 24px;max-width:620px;background:#f5f7fa;color:#172333}main{padding:28px;background:white;border-radius:18px}h1{font-size:26px;margin-top:0}button,input{font:inherit;padding:12px;border-radius:8px;border:1px solid #bbb}button{cursor:pointer;background:#1479ba;color:white;border:0}input{box-sizing:border-box;width:100%;margin-bottom:14px}small{color:#556}#qr{width:280px;height:280px}#error{color:#a32121} [hidden]{display:none!important}
+</style>
+<main><h1>Подключение Telegram</h1><p id="status" role="status">Проверяю подключение…</p><p id="error" role="alert"></p>
+<section id="scan" hidden><p>На телефоне: <b>Telegram → Настройки → Устройства → Подключить устройство</b>. Отсканируй QR-код.</p><img id="qr" alt="QR-код входа в Telegram"></section>
+<form id="password" hidden><label for="secret">Пароль двухэтапной проверки Telegram</label><p><small>Это пароль, заданный в Telegram. Не код из сообщения, не PIN приложения и не код разблокировки телефона.</small></p><input id="secret" name="password" type="password" autocomplete="current-password" required><button>Подтвердить вход</button></form>
+<button id="start" hidden>Восстановить подключение</button> <button id="check">Проверить подключение</button>
+<p><small>Вход выполняется в существующий аккаунт. Пароль не сохраняется. Сообщения при проверке не отправляются.</small></p></main>
+<script>
+// Polling renders state only; login starts exclusively after an explicit click.
+const csrf='__CSRF__', el=id=>document.getElementById(id);
+const labels={checking:'Проверяю подключение…',connected:'✓ Telegram подключён. Можно пользоваться Messenger Hub.',unavailable:'Нет подключения к Telegram. Это может быть сбой связи или потеря сессии. Сначала повтори проверку.',starting:'Готовлю безопасный вход…',qr:'Отсканируй QR-код телефоном.',password:'QR принят. Введи пароль двухэтапной проверки.',password_invalid:'Telegram отклонил пароль двухэтапной проверки. Проверь пароль именно этого аккаунта.',password_checking:'Проверяю пароль в Telegram…',verifying:'Вход выполнен. Проверяю подключение через Messenger Hub…',installed_unverified:'Вход сохранён, но Hub пока не подтвердил подключение. Нажми «Проверить подключение».',failed:'Вход не завершён.'};
+const reasons={account_mismatch:'Выбран другой аккаунт. Его сессия не сохранена.',credentials_changed:'Настройки изменились во время входа. Повтори восстановление.',qr_timeout:'Время сканирования истекло. Нажми «Восстановить подключение».',password_timeout:'Время ввода пароля истекло. Начни вход заново.',password_attempt_limit:'Telegram трижды отклонил пароль. Не повторяй вход, пока не проверишь пароль.',flood_wait:'Telegram ограничил попытки. Подожди перед следующим входом.',recovery_failed:'Не удалось завершить вход. Старое подключение не удалено. Можно повторить проверку.',bridge_start_failed:'Не удалось запустить Telegram-мост. Нужна диагностика сервиса.'};
+async function update(){try{let s=await(await fetch('/status')).json();el('status').textContent=labels[s.status]||'Проверяю…';el('error').textContent=reasons[s.reason]||'';el('scan').hidden=s.status!=='qr';el('password').hidden=!['password','password_invalid'].includes(s.status);el('start').hidden=!['unavailable','failed'].includes(s.status);if(s.status==='qr')el('qr').src='/qr.svg?t='+Date.now()}catch{el('error').textContent='Страница временно недоступна. Обнови её.'}}
+async function post(path,data={}){let r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({csrf,...data})});if(!r.ok){let e=await r.json();el('error').textContent=e.message||'Форма пока не готова. Дождись обновления.';if(e.error==='stale_form')setTimeout(()=>location.reload(),1500)}else await update()}
+el('start').onclick=()=>{if(confirm('Начать повторный вход? Текущее подключение Telegram будет временно приостановлено.'))post('/start')};
+el('check').onclick=()=>post('/check');
+el('password').onsubmit=async e=>{e.preventDefault();const secret=el('secret');const value=secret.value;secret.value='';await post('/password',{password:value})};
+setInterval(update,2000);update();
+</script></html>

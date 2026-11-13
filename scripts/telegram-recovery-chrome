@@ -1,0 +1,8 @@
+#!/bin/sh
+# xdg-open must skip the desktop's HTTP MIME handler (which may be Yandex).
+# Only this pinned child restores the real display, then starts Google Chrome;
+# the desktop default and global environment are never changed.
+export DISPLAY="${MESSENGER_RECOVERY_DISPLAY-}"
+export WAYLAND_DISPLAY="${MESSENGER_RECOVERY_WAYLAND_DISPLAY-}"
+unset MESSENGER_RECOVERY_DISPLAY MESSENGER_RECOVERY_WAYLAND_DISPLAY
+exec /usr/bin/google-chrome --new-window "$@"

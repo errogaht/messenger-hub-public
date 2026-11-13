@@ -1,0 +1,87 @@
+import {randomUUID} from 'node:crypto';
+import {HubError} from './contracts.mjs';
+
+/** Public diagnostics are generated from categories, never raw exceptions/provider bodies. */
+export function diagnostic(error,stage='operation',correlationId=randomUUID()){
+ const code=error instanceof HubError&&typeof error.code==='string'?error.code:error?.name==='ZodError'?'validation_failed':'operation_failed';
+ const retryable=/unavailable|timeout|rate_limit|http_429|http_5\d\d|interrupted|service_restarted|queue_full|transport_failed|video_cache_busy/.test(code);
+ // Retry guidance follows the actual tool contract. Reads have no requestId
+ // or explicit retry flag; uncertain writes retain their original receipt.
+ const readStages=new Set(['history','message_get','message_context','conversations','contacts','topics','search_messages','health','identity','schema','wait_for_settled_message']);
+ const descriptions={
+  upstream_unavailable:'The existing provider transport is unavailable. This does not establish absence or lack of chat access.',
+  upstream_timeout:'The existing provider did not answer within the request time budget. No automatic operation replay occurred.',
+  conversation_format_invalid:'Invalid Telegram address. Use a numeric ID, username, t.me public peer/post link or title. Invite links are not supported.',
+  conversation_not_found:'No matching Telegram peer was found in the completed lookup. This is not an access-denied result.',
+  conversation_ambiguous:'Several authorized conversations match this title. Choose a candidate ID or exact username.',
+  conversation_access_denied:'Telegram denied this peer read. No account switch, join or new session is attempted.',
+  conversation_search_incomplete:'The bounded Telegram catalog is incomplete; absence or uniqueness cannot be established. Use an exact username/link or ID.',
+  conversation_not_cached:'No cached Telegram peer metadata matches this address. Explicit refresh is needed; no provider was contacted.',
+  telegram_identity_shape:'Telegram account identity is missing or malformed. No authenticated availability is established; inspect the existing provider session without switching accounts or copying authorization.',
+  telegram_read_provider_failed:'Telegram peer lookup/read failed at the provider. This does not establish absence or lack of access.',
+
+  reply_not_in_context:'Legacy preflight refused the quote before sending. The new Hub omits unavailable quotes; reconcile this original receipt without automatic resending.',
+  reply_target_invalid:'The provider explicitly rejected the reply target before creating a message.',
+  telegram_history_shape:'Telegram returned a history record that does not match its adapter contract. Safe field/type/recordIndex details identify the malformed field; raw messages are never included.',
+  message_not_found_in_window:'The exact reply/message could not be confirmed in the bounded provider lookup. This does not establish deletion or absence outside that window.',
+  provider_route_mismatch:'The provider returned a different conversation or message identity. No reply is sent to a substituted source.',
+  video_review_disabled:'Explicit video preparation is disabled in the video-review purpose settings.',
+  video_not_cached:'The original video is not cached. Explicitly call video_prepare or file_download first; no provider was contacted.',
+  video_not_ready:'Timestamped video artifacts are not ready. Check video_status; no ASR was started by this read.',
+  video_cache_busy:'Another CLI/Hub process owns this content/profile OS lock. Retry the read/frame request after it finishes; do not delete locks or receipts.',
+  video_submission_unknown:'The paid submission outcome is unknown. Reconcile its preserved receipt; never upload again blindly.',
+  message_not_cached:'This exact message is absent from local cache. Explicitly refresh the selected route; no provider was contacted.',
+  cache_cursor_invalid:'Cached cursor belongs to another scope/route/options or is unknown; restart cached pagination explicitly.',
+  native_ingest_disabled:'Native ingestion requires an enabled binding and nativeIngest scope grant. No route is enabled automatically.',
+  native_route_unselected:'This exact conversation/topic has no enabled subscription; no native body was saved.',
+  native_signature_invalid:'The native webhook signature failed verification; no body was saved.',
+  native_account_mismatch:'Native account identity does not match the configured connection; no login or account switch is attempted.',
+  topic_reply_verification_unsupported:'Arbitrary quoted replies inside a forum need exact native thread evidence. No message was sent.',
+  inbox_not_authorized:'This credential has no inbox permission.',
+  inbox_push_disabled:'Local push requires both inbox.push.enabled and this scope inbox.push. No collector or grant is enabled automatically.',
+  inbox_cursor_invalid:'This replay/resume cursor is unknown or belongs to a different consumer or transport.',
+  inbox_cursor_ahead:'The requested position is ahead of this consumer observed journal.',
+  inbox_response_budget_too_small:'The serialized envelope exceeds the budget. Increase maxResponseChars; no ack was advanced.',
+  codexlb_http_401:'Codex LB rejected the private key. No fallback or automatic retry.',
+  codexlb_http_403:'Codex LB denied model access or the upstream subscription request. Verify gpt-4o-transcribe access privately.',
+  codexlb_http_429:'Codex LB account or gateway limit reached. No automatic retry.',
+  codexlb_not_configured:'Configure the selected Codex LB ASR purpose privately; no fallback is allowed.',
+  asr_not_configured:'The selected ASR purpose is not configured; no fallback is allowed.',
+  palatine_not_configured:'All audio/video recognition requires an explicitly configured Palatine provider; no fallback is allowed.',
+  subscription_busy:'A live worker owns this subscription; retry the same revision after its read completes.',
+  inbox_lease_expired:'This receipt expired. Claim the same consumer again and save idempotently before acknowledging the current token.',
+  inbox_receipt_invalid:'The receipt does not belong to the current consumer/token.',
+  group_not_authorized:'This credential has no group permission for this connection/client key.',
+  group_provisioning_disabled:'Group provisioning is disabled or the client key is outside the administrator policy.',
+  group_policy_violation:'The title or bot does not satisfy the owner-only forum policy.',
+  group_owner_mismatch:'The actual connected Telegram self does not match the configured owner. No group mutation is allowed.',
+  group_verification_invalid:'The provider ready flag does not match the required privacy, membership, General or rights evidence.',
+  group_verification_incomplete:'The existing group is retained; some required provider evidence is missing.',
+  chat_access_denied:'The configured Bitrix actor is not permitted in this chat. Do not switch accounts or expand access automatically.',
+  portal_transport_failed:'SSH or the remote CLI exited without a valid portal response. The precise failing layer and message creation are unknown.',
+  portal_response_invalid:'The portal response was missing or invalid. Message creation is unknown.',
+  portal_bootstrap_failed:'Bitrix initialization failed before the message write.',
+  portal_write_failed:'Bitrix failed during native sending; message creation is not established.',
+  portal_send_ambiguous:'A prior Bitrix native submission has no verified receipt. Its durable fence blocks another message creation; inspect the original receipt, never reset the journal or change requestId.',
+  portal_recovery_storage_unavailable:'Bitrix recovery storage could not be accessed safely. No new native submission was authorized.',
+  portal_receipt_unconfirmed:'Bitrix created a message but its receipt could not be verified.',
+  rewrite_invalid_json:'The style model returned invalid JSON during preparation. No message was sent.',
+  validation_failed:'A value did not satisfy the public or provider data contract.',
+  endpoint_already_linked:'This endpoint already belongs to a contact.',
+  attachment_mismatch:'The attachmentId does not identify this source attachment. This is an input/source binding error, not a provider outage.',
+  attachment_route_mismatch:'This fileId belongs to a different source route/message. Do not substitute it into this message.',
+  attachment_not_found:'Provider returned HTTP 404. Whether the media expired is not established.',
+  attachment_expired:'Provider explicitly reported expired media.',
+  attachment_gone:'Provider returned HTTP 410 (Gone). The exact retention or deletion reason is not established.',
+  attachment_decryption_failed:'Provider could not decrypt or validate downloaded media.',
+  attachment_permission_denied:'Provider denied access to the attachment.',
+  attachment_unavailable:'Provider could not supply the attachment; the exact cause is unknown.',
+  upstream_rejected:'Provider rejected the operation without a classified cause.',
+  operation_failed:'The operation failed internally; no raw exception details are exposed.'
+ };
+ return {code,stage,correlationId,retryable,description:descriptions[code]??code.replaceAll('_',' '),
+  ...(['attachment_mismatch','attachment_route_mismatch'].includes(code)?{category:'input_error'}:{}),
+  nextAction:['attachment_mismatch','attachment_route_mismatch'].includes(code)?'Use messenger_attachment with attachments[].id from this exact message (Telegram example: message:803134), not attachments[].fileId. To read a registered Hub UUID use messenger_file_download({fileId: UUID}) under its authorized source. Do not ask the sender to resend.':stage==='send'?'Check the receipt/history; never resend under a new requestId.':retryable&&readStages.has(stage)?'Retry the same read with identical input and cursor after provider recovery. Do not add requestId or retry flags: this read schema has none. A failed read does not advance its cursor.':retryable?'Retry preparation with the original requestId and its supported explicit retry flag; reconcile uncertain writes without resending.':/attachment_/.test(code)?'Check the source in the messenger or ask the sender to resend; do not assume expiry.':'Correct the input or inspect the indicated stage before retrying.',
+  ...(error?.name==='ZodError'?{invalidFields:error.issues.slice(0,12).map(x=>({path:x.path.join('.'),code:x.code}))}:{}),
+  ...(error instanceof HubError?error.details:{})};
+}

@@ -1,0 +1,3 @@
+# Isolated Python bridge/core tests only; providers and sessions are not installed.
+Telethon==1.44.0
+requests==2.32.5

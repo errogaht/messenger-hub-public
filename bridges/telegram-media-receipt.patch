@@ -1,0 +1,44 @@
+diff --git a/telegram_mcp/tools/media.py b/telegram_mcp/tools/media.py
+index 93b54c6..b867beb 100644
+--- a/telegram_mcp/tools/media.py
++++ b/telegram_mcp/tools/media.py
+@@ -430,3 +430,39 @@ __all__ = [
+     "get_gif_search",
+     "send_gif",
+ ]
++
++
++@mcp.tool(annotations=ToolAnnotations(title="Send Media With Receipt", openWorldHint=True, destructiveHint=True))
++@with_account(readonly=False)
++@validate_id("chat_id")
++async def send_media_with_receipt(
++    chat_id: Union[int, str], file_path: str, media_type: str,
++    caption: str = "", reply_to: Optional[int] = None,
++    ctx: Optional[Context] = None, account: str = None,
++) -> str:
++    """Send one typed local file and return its correlated Telegram message ID.
++
++    Used by Messenger Hub's durable idempotency journal. Existing roots checks and
++    account ownership remain authoritative. No automatic retry, format inference,
++    session copy, or follow-up text send is performed here.
++    """
++    if media_type not in ("image", "document", "voice", "audio", "video"):
++        return "Error: unsupported media_type"
++    if len(caption) > 1024 or (reply_to is not None and reply_to <= 0):
++        return "Error: invalid caption or reply_to"
++    try:
++        safe_path, path_error = await _resolve_readable_file_path(
++            raw_path=file_path, ctx=ctx, tool_name="send_file",
++        )
++        if path_error:
++            return path_error
++        cl = get_client(account)
++        entity = await resolve_entity(chat_id, cl)
++        message = await cl.send_file(
++            entity, str(safe_path), caption=caption, parse_mode=None,
++            reply_to=reply_to, force_document=media_type == "document",
++            voice_note=media_type == "voice",
++        )
++        return json.dumps({"sent": True, "message_id": message.id})
++    except Exception as e:
++        return log_and_format_error("send_media_with_receipt", e, chat_id=chat_id)

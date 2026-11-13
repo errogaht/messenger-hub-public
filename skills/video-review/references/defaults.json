@@ -1,0 +1,9 @@
+{
+  "model": "palatine_large_highspeed",
+  "fast_inference": true,
+  "submit_url": "https://api.palatine.ru/api/v1/transcribe/do_transcribe",
+  "status_url": "https://api.palatine.ru/api/v1/transcribe/task_status/{task_id}",
+  "submit_timeout_seconds": 180,
+  "poll_timeout_seconds": 30,
+  "poll_interval_seconds": 5
+}
